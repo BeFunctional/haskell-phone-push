@@ -33,27 +33,25 @@
 --
 -- == Credits
 -- Originally based on a blog post by Teemu Ikonen, available <https://bravenewmethod.com/2012/11/08/apple-push-notifications-with-haskell/ here>.
-
 module Network.PushNotification.IOS where
 
-import Control.Exception (bracket, catch, IOException)
+import Control.Exception (IOException, bracket, catch)
 import Data.Binary.Put
-import Data.Convertible (convert)
-import GHC.Word (Word32, Word16)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
-
+import Data.Convertible (convert)
+import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
-
-import Network.BSD (getHostByName, hostAddress, getProtocolNumber)
+import GHC.Word (Word16, Word32)
+import Network.BSD (getHostByName, getProtocolNumber, hostAddress)
 import Network.Socket
 import OpenSSL
 import OpenSSL.Session as SSL
 
 data APNSConfig = APNSConfig
-  { _APNSConfig_server :: String
-  , _APNSConfig_key :: FilePath
-  , _APNSConfig_certificate :: FilePath
+  { _APNSConfig_server :: String,
+    _APNSConfig_key :: FilePath,
+    _APNSConfig_certificate :: FilePath
   }
   deriving (Show, Read, Eq, Ord)
 
@@ -70,10 +68,10 @@ feedbackTest :: String
 feedbackTest = "feedback.sandbox.push.apple.com"
 
 data ApplePushMessage = ApplePushMessage
-  { _applePushMessage_deviceToken :: B.ByteString
-  , _applePushMessage_payload :: BL.ByteString
-  -- ^ JSON encoded payload, conforming to <https://developer.apple.com/library/content/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/PayloadKeyReference.html#//apple_ref/doc/uid/TP40008194-CH17-SW1 this specification>. See "PhonePush.IOS.Payload"
-  , _applePushMessage_expiry :: Word32
+  { _applePushMessage_deviceToken :: B.ByteString,
+    -- | JSON encoded payload, conforming to <https://developer.apple.com/library/content/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/PayloadKeyReference.html#//apple_ref/doc/uid/TP40008194-CH17-SW1 this specification>. See "PhonePush.IOS.Payload"
+    _applePushMessage_payload :: BL.ByteString,
+    _applePushMessage_expiry :: Word32
   }
 
 checkFailLive :: FilePath -> FilePath -> IO [B.ByteString]
@@ -86,10 +84,11 @@ withSocketSafe :: ProtocolNumber -> (Socket -> IO a) -> IO a
 withSocketSafe proto =
   bracket (socket AF_INET Stream proto) $ \sock ->
     catch (close sock) $ \(e :: IOException) ->
-      putStrLn . unwords $ [ "Caught exception trying to close"
-                           , "Apple push notifications socket:"
-                           , show e
-                           ]
+      putStrLn . unwords $
+        [ "Caught exception trying to close",
+          "Apple push notifications socket:",
+          show e
+        ]
 
 checkFail :: String -> FilePath -> FilePath -> IO [B.ByteString]
 checkFail server keyfile certfile = withOpenSSL $ do
@@ -105,7 +104,7 @@ checkFail server keyfile certfile = withOpenSSL $ do
     Network.Socket.connect sock (SockAddrInet 2196 (hostAddress he))
 
     sslsocket <- connection ssl sock
-    SSL.connect sslsocket  -- Handshake
+    SSL.connect sslsocket -- Handshake
     bs <- SSL.read sslsocket 7600000
     print $ B.length bs
     SSL.shutdown sslsocket Unidirectional
@@ -129,24 +128,25 @@ withAPNSSocket (APNSConfig server keyfile certfile) f = withOpenSSL $ do
   contextSetDefaultCiphers ssl
   contextSetVerificationMode ssl SSL.VerifyNone
   -- Open socket
-  proto <- (getProtocolNumber "tcp")
+  proto <- getProtocolNumber "tcp"
   he <- getHostByName server
   withSocketSafe proto $ \sock -> do
     Network.Socket.connect sock (SockAddrInet 2195 (hostAddress he))
     -- Promote socket to SSL stream
     sslsocket <- connection ssl sock
-    SSL.connect sslsocket  -- Handshake
+    SSL.connect sslsocket -- Handshake
     -- Use socket
     f sslsocket
     -- Close gracefully
     SSL.shutdown sslsocket Unidirectional
 
 -- | Send a message through the SSL socket
-sendApplePushMessage :: SSL -> ApplePushMessage -> IO ()
-sendApplePushMessage sslsocket m =
-  let lpdu = runPut $ buildPDU m
-      pdu = B.concat $ BL.toChunks lpdu
-  in SSL.write sslsocket pdu
+sendApplePushMessage :: SSL -> ApplePushMessage -> IO (Either Text ())
+sendApplePushMessage sslsocket m = sequence $ do
+  pdu <- buildPDU m
+  let lpdu = runPut pdu
+      bytes = B.concat $ BL.toChunks lpdu
+  pure $ SSL.write sslsocket bytes
 
 tokenLength :: Num a => a
 tokenLength = 32
@@ -154,11 +154,11 @@ tokenLength = 32
 maxPayloadLength :: Num a => a
 maxPayloadLength = 2048
 
-buildPDU :: ApplePushMessage -> Put
+buildPDU :: ApplePushMessage -> Either Text Put
 buildPDU (ApplePushMessage token payload expiry)
-  | B.length token /= tokenLength = fail "Invalid token"
-  | BL.length payload >= maxPayloadLength = fail "Payload too large"
-  | otherwise = do
+  | B.length token /= tokenLength = Left "Invalid token"
+  | BL.length payload >= maxPayloadLength = Left "Payload too large"
+  | otherwise = Right $ do
     putWord8 1
     putWord32be 1
     putWord32be expiry
@@ -172,10 +172,10 @@ splitBS xs =
   let xs1 = B.drop 6 xs
       token = B.take 32 xs1
       nexst = B.drop 32 xs1
-  in if B.null token then [] else token : splitBS nexst
+   in if B.null token then [] else token : splitBS nexst
 
 getExpiryTime :: IO Word32
 getExpiryTime = do
   pt <- getPOSIXTime
   -- One hour expiry time
-  return ( (round pt + 60*60):: Word32)
+  return ((round pt + 60 * 60) :: Word32)
